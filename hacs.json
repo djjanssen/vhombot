@@ -1,0 +1,12 @@
+
+
+{
+    "name": "LG VHombot Robot Vacuum Cleaner",
+    "country": ["EN"],
+    "domains": ["vacuum"],
+    "iot_class": "Local Polling",
+    "content_in_root": false,
+    "render_readme": false,
+    "zip_release": true,
+    "filename": "lg-vhombot.zip"
+}
