@@ -1,113 +1,228 @@
-"""Support for Neato Connected Vacuums."""
-from __future__ import annotations
+"""
+Got the original code from: https://github.com/ericpignet/home-assistant-lg_hombot
+Support for Wi-Fi enabled LG Hombot robot vacuum cleaner.
 
-from datetime import timedelta
+For more details about this platform, please refer to the documentation
+https://home-assistant.io/components/vacuum.lg_hombot/
+"""
+import asyncio
+import urllib.parse
 import logging
-from typing import Any
-
 import voluptuous as vol
+
 import aiohttp
 import async_timeout
 
 from homeassistant.components.vacuum import (
-    ATTR_STATUS,
-    STATE_CLEANING,
-    STATE_DOCKED,
-    STATE_ERROR,
-    STATE_RETURNING,
-    SUPPORT_BATTERY,
-    SUPPORT_CLEAN_SPOT,
-    SUPPORT_LOCATE,
-    SUPPORT_MAP,
-    SUPPORT_PAUSE,
-    SUPPORT_RETURN_HOME,
-    SUPPORT_START,
-    SUPPORT_STATE,
-    SUPPORT_STOP,
-    StateVacuumEntity,
-)
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_MODE, STATE_IDLE, STATE_PAUSED
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_validation as cv, entity_platform
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    VacuumEntity, PLATFORM_SCHEMA, SUPPORT_BATTERY, SUPPORT_FAN_SPEED,
+    SUPPORT_PAUSE, SUPPORT_RETURN_HOME, SUPPORT_SEND_COMMAND, SUPPORT_STATUS,
+    SUPPORT_STOP, SUPPORT_TURN_OFF, SUPPORT_TURN_ON)
+from homeassistant.const import (
+    CONF_HOST, CONF_PORT, CONF_NAME)
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import homeassistant.helpers.config_validation as cv
 
-from .const import (
-    DOMAIN,
-    SCAN_INTERVAL_MINUTES,
-)
 
 _LOGGER = logging.getLogger(__name__)
 
-SCAN_INTERVAL = timedelta(minutes=SCAN_INTERVAL_MINUTES)
+ATTR_STATE = 'JSON_ROBOT_STATE'
+ATTR_BATTERY = 'JSON_BATTPERC'
+ATTR_MODE = 'JSON_MODE'
+ATTR_REPEAT = 'JSON_REPEAT'
+ATTR_LAST_CLEAN = 'CLREC_LAST_CLEAN'
+ATTR_TURBO = 'JSON_TURBO'
+
+DEFAULT_NAME = 'Hombot'
+
+ICON = 'mdi:robot-vacuum'
+PLATFORM = 'lg_hombot'
+
+FAN_SPEED_NORMAL = 'Normal'
+FAN_SPEED_TURBO = 'Turbo'
+FAN_SPEEDS = [FAN_SPEED_NORMAL, FAN_SPEED_TURBO]
+
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    vol.Required(CONF_HOST): cv.string,
+    vol.Required(CONF_PORT): cv.string,
+}, extra=vol.ALLOW_EXTRA)
+
+# Commonly supported features
+SUPPORT_HOMBOT = SUPPORT_BATTERY | SUPPORT_PAUSE | SUPPORT_RETURN_HOME | \
+                 SUPPORT_SEND_COMMAND | SUPPORT_STATUS | SUPPORT_STOP | \
+                 SUPPORT_TURN_OFF | SUPPORT_TURN_ON | SUPPORT_FAN_SPEED
 
 
-SUPPORT_VHOMBOT = (
-    SUPPORT_BATTERY
-    | SUPPORT_PAUSE
-    | SUPPORT_RETURN_HOME
-    | SUPPORT_STOP
-    | SUPPORT_START
-    | SUPPORT_STATE
-    | SUPPORT_LOCATE
-)
+@asyncio.coroutine
+def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
+    """Set up the LG Hombot vacuum cleaner platform."""
+    if PLATFORM not in hass.data:
+        hass.data[PLATFORM] = {}
+
+    host = config.get(CONF_HOST)
+    port = config.get(CONF_PORT)
+    name = config.get(CONF_NAME)
+
+    _LOGGER.info("Creating LG Hombot object %s (%s:%s)",
+                 name, host, port)
+    #TODO Async
+    #yield from hass.async_add_job(roomba.connect)
+    hombot_vac = HombotVacuum(name, host, port)
+    hass.data[PLATFORM][name] = hombot_vac
+
+    async_add_devices([hombot_vac], update_before_add=True)
 
 
-ATTR_CLEAN_START = "clean_start"
-ATTR_CLEAN_STOP = "clean_stop"
-ATTR_CLEAN_AREA = "clean_area"
-ATTR_CLEAN_BATTERY_START = "battery_level_at_clean_start"
-ATTR_CLEAN_BATTERY_END = "battery_level_at_clean_end"
-ATTR_CLEAN_SUSP_COUNT = "clean_suspension_count"
-ATTR_CLEAN_SUSP_TIME = "clean_suspension_time"
-ATTR_CLEAN_PAUSE_TIME = "clean_pause_time"
-ATTR_CLEAN_ERROR_TIME = "clean_error_time"
-ATTR_LAUNCHED_FROM = "launched_from"
+class HombotVacuum(VacuumEntity):
+    """Representation of a Hombot vacuum cleaner robot."""
 
-ATTR_NAVIGATION = "navigation"
-ATTR_CATEGORY = "category"
-ATTR_ZONE = "zone"
+    def __init__(self, name, host, port):
+        """Initialize the Hombot handler."""
+        self._battery_level = None
+        self._fan_speed = None
+        self._is_on = False
+        self._name = name
+        self._state_attrs = {}
+        self._status = None
+        self._host = host
+        self._port = port
 
+    @property
+    def supported_features(self):
+        """Flag vacuum cleaner robot features that are supported."""
+        return SUPPORT_HOMBOT
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
-) -> None:
-    """Set up Neato vacuum with config entry."""
-    dev = []
+    @property
+    def fan_speed(self):
+        """Return the fan speed of the vacuum cleaner."""
+        return self._fan_speed
 
-    # mapdata: dict[str, Any] | None = hass.data.get(NEATO_MAP_DATA)
-    platform = entity_platform.async_get_current_platform()
-    assert platform is not None
+    @property
+    def fan_speed_list(self):
+        """Get the list of available fan speed steps of the vacuum cleaner."""
+        return FAN_SPEEDS
 
+    @property
+    def battery_level(self):
+        """Return the battery level of the vacuum cleaner."""
+        return self._battery_level
 
-class VHomBotConnectedVacuum(StateVacuumEntity):
-    """Representation of a LG VHombot Connected Vacuum."""
+    @property
+    def status(self):
+        """Return the status of the vacuum cleaner."""
+        return self._status
 
-    def __init__(self) -> None:
-        """Initialize the Vhombot Connected Vacuum."""
-        self._name: str | None = None
-        self._serial: str | None = None
-        self._status_state: str | None = None
-        self._clean_state: str | None = None
-        self._state: dict[str, Any] | None = None
-        self._clean_time_start: str | None = None
-        self._clean_time_stop: str | None = None
-        self._clean_area: float | None = None
-        self._clean_battery_start: int | None = None
-        self._clean_battery_end: int | None = None
-        self._clean_susp_charge_count: int | None = None
-        self._clean_susp_time: int | None = None
-        self._clean_pause_time: int | None = None
-        self._clean_error_time: int | None = None
-        self._launched_from: str | None = None
-        self._battery_level: int | None = None
-        self._robot_boundaries: list = []
-        self._robot_stats: dict[str, Any] | None = None
+    @property
+    def is_on(self) -> bool:
+        """Return True if entity is on."""
+        return self._is_on
 
-    def update(self) -> None:
-        """Update the states of Neato Vacuums."""
-        _LOGGER.debug("Running Vhombot Vacuums update for '%s'", self.entity_id)
+    @property
+    def name(self):
+        """Return the name of the device."""
+        return self._name
+
+    @property
+    def icon(self):
+        """Return the icon to use for device."""
+        return ICON
+
+    @property
+    def device_state_attributes(self):
+        """Return the state attributes of the device."""
+        return self._state_attrs
+
+    @asyncio.coroutine
+    def async_query(self, command):
+        _LOGGER.debug('In async_query')
+        try:
+            websession = async_get_clientsession(self.hass)
+
+            with async_timeout.timeout(10, loop=self.hass.loop):
+                url = 'http://{}:{}/json.cgi?{}'.format(self._host, self._port, urllib.parse.quote(command, safe=':'))
+                _LOGGER.debug(url)
+                webresponse = yield from websession.get(url)
+                response = yield from webresponse.read()
+            return True
+        except asyncio.TimeoutError:
+            _LOGGER.error("LG Hombot timed out")
+            return False
+        except aiohttp.ClientError as error:
+            _LOGGER.error("Error getting LG Hombot data: %s", error)
+            return False
+
+    @asyncio.coroutine
+    def async_turn_on(self, **kwargs):
+        """Turn the vacuum on."""
+        is_on = yield from self.async_query('{"COMMAND":"CLEAN_START"}')
+        if is_on:
+            self._is_on = True
+
+    @asyncio.coroutine
+    def async_turn_off(self, **kwargs):
+        """Turn the vacuum off and return to home."""
+        yield from self.async_return_to_base()
+
+    @asyncio.coroutine
+    def async_stop(self, **kwargs):
+        """Stop the vacuum cleaner."""
+        yield from self.async_pause()
+
+    @asyncio.coroutine
+    def async_pause(self, **kwargs):
+        """Pause the cleaning cycle."""
+        is_off = yield from self.async_query('{"COMMAND":"PAUSE"}')
+        if is_off:
+            self._is_on = False
+
+    @asyncio.coroutine
+    def async_start_pause(self, **kwargs):
+        """Pause the cleaning task or resume it."""
+        if self.is_on:
+            yield from self.async_pause()
+        else:  # vacuum is off or paused
+            yield from self.async_turn_on()
+
+    @asyncio.coroutine
+    def async_return_to_base(self, **kwargs):
+        """Set the vacuum cleaner to return to the dock."""
+        is_on = yield from self.async_query('{"COMMAND":"HOMING"}')
+        if is_on:
+            self._is_on = False
+
+    @asyncio.coroutine
+    def async_toggle_turbo(self, **kwargs):
+        """Toggle between normal and turbo mode."""
+        _LOGGER.debug('In toggle')
+        yield from self.async_query('turbo')
+
+    @asyncio.coroutine
+    def async_set_fan_speed(self, fan_speed, **kwargs):
+        """Set fan speed."""
+        if fan_speed.capitalize() in FAN_SPEEDS:
+            fan_speed = fan_speed.capitalize()
+            _LOGGER.debug("Set fan speed to: %s", fan_speed)
+            if fan_speed == FAN_SPEED_NORMAL:
+                if self._fan_speed == FAN_SPEED_TURBO:
+                    yield from self.async_toggle_turbo()
+            elif fan_speed == FAN_SPEED_TURBO:
+                if self._fan_speed == FAN_SPEED_NORMAL:
+                    yield from self.async_toggle_turbo()
+            self._fan_speed = fan_speed
+        else:
+            _LOGGER.error("No such fan speed available: %s", fan_speed)
+            return
+
+    @asyncio.coroutine
+    def async_send_command(self, command, params, **kwargs):
+        """Send raw command."""
+        _LOGGER.debug("async_send_command %s", command)
+        yield from self.query(command)
+        return True
+
+    @asyncio.coroutine
+    def async_update(self):
+        """Fetch state from the device."""
         response = ''
         try:
             websession = async_get_clientsession(self.hass)
@@ -141,149 +256,3 @@ class VHomBotConnectedVacuum(StateVacuumEntity):
         self._state_attrs[ATTR_MODE] = all_attrs[ATTR_MODE]
         self._state_attrs[ATTR_REPEAT] = all_attrs[ATTR_REPEAT]
         self._state_attrs[ATTR_LAST_CLEAN] = all_attrs[ATTR_LAST_CLEAN]
-
-
-
-    @property
-    def name(self) -> str:
-        """Return the name of the device."""
-        return self._name
-
-    @property
-    def supported_features(self) -> int:
-        """Flag vacuum cleaner robot features that are supported."""
-        return SUPPORT_VHOMBOT
-
-    @property
-    def battery_level(self) -> int | None:
-        """Return the battery level of the vacuum cleaner."""
-        return self._battery_level
-
-    @property
-    def available(self) -> bool:
-        """Return if the robot is available."""
-        return True
-
-    @property
-    def icon(self) -> str:
-        """Return neato specific icon."""
-        return "mdi:robot-vacuum-variant"
-
-    @property
-    def state(self) -> str | None:
-        """Return the status of the vacuum cleaner."""
-        return self._clean_state
-
-    @property
-    def unique_id(self) -> str:
-        """Return a unique ID."""
-        return self._serial
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return the state attributes of the vacuum cleaner."""
-        data: dict[str, Any] = {}
-
-        if self._status_state is not None:
-            data[ATTR_STATUS] = self._status_state
-        if self._clean_time_start is not None:
-            data[ATTR_CLEAN_START] = self._clean_time_start
-        if self._clean_time_stop is not None:
-            data[ATTR_CLEAN_STOP] = self._clean_time_stop
-        if self._clean_area is not None:
-            data[ATTR_CLEAN_AREA] = self._clean_area
-        if self._clean_susp_charge_count is not None:
-            data[ATTR_CLEAN_SUSP_COUNT] = self._clean_susp_charge_count
-        if self._clean_susp_time is not None:
-            data[ATTR_CLEAN_SUSP_TIME] = self._clean_susp_time
-        if self._clean_pause_time is not None:
-            data[ATTR_CLEAN_PAUSE_TIME] = self._clean_pause_time
-        if self._clean_error_time is not None:
-            data[ATTR_CLEAN_ERROR_TIME] = self._clean_error_time
-        if self._clean_battery_start is not None:
-            data[ATTR_CLEAN_BATTERY_START] = self._clean_battery_start
-        if self._clean_battery_end is not None:
-            data[ATTR_CLEAN_BATTERY_END] = self._clean_battery_end
-        if self._launched_from is not None:
-            data[ATTR_LAUNCHED_FROM] = self._launched_from
-
-        return data
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Device info for vhombot robot."""
-        stats = self._robot_stats
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._serial)},
-            manufacturer=stats["battery"]["vendor"] if stats else None,
-            model=stats["model"] if stats else None,
-            name=self._name,
-            sw_version=stats["firmware"] if stats else None,
-        )
-
-    def start(self) -> None:
-        """Start cleaning or resume cleaning."""
-        if self._state:
-            try:
-                if self._state["state"] == 1:
-                    _LOGGER.info("Implement starting")
-                    # self.robot.start_cleaning()
-                elif self._state["state"] == 3:
-                    _LOGGER.info("Implement Continue")
-            except Exception as ex:
-                _LOGGER.error(
-                    "VHombot vacuum connection error for '%s': %s", self.entity_id, ex
-                )
-
-    def pause(self) -> None:
-        """Pause the vacuum."""
-        try:
-            _LOGGER.info("Implement pause")
-        except Exception as ex:
-            _LOGGER.error(
-                "VHombot vacuum connection error for '%s': %s", self.entity_id, ex
-            )
-
-    def return_to_base(self, **kwargs: Any) -> None:
-        """Set the vacuum cleaner to return to the dock."""
-        try:
-            if self._clean_state == STATE_CLEANING:
-                _LOGGER.info("Implement return to base")
-
-            self._clean_state = STATE_RETURNING
-            _LOGGER.info("Implement return to base")
-
-        except Exception as ex:
-            _LOGGER.error(
-                "VHomeBot vacuum connection error for '%s': %s", self.entity_id, ex
-            )
-
-    def stop(self, **kwargs: Any) -> None:
-        """Stop the vacuum cleaner."""
-        try:
-            _LOGGER.info("Implement stopping")
-
-        except Exception as ex:
-            _LOGGER.error(
-                "VHombot vacuum connection error for '%s': %s", self.entity_id, ex
-            )
-
-    def locate(self, **kwargs: Any) -> None:
-        """Locate the robot by making it emit a sound."""
-        try:
-            _LOGGER.info("Implement make some noice")
-
-        except Exception as ex:
-            _LOGGER.error(
-                "VHombot vacuum connection error for '%s': %s", self.entity_id, ex
-            )
-
-    def clean_spot(self, **kwargs: Any) -> None:
-        """Run a spot cleaning starting from the base."""
-        try:
-            _LOGGER.info("Implement spot cleaning")
-
-        except Exception as ex:
-            _LOGGER.error(
-                "VHombot vacuum connection error for '%s': %s", self.entity_id, ex
-            )
