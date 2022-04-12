@@ -6,6 +6,8 @@ import logging
 from typing import Any
 
 import voluptuous as vol
+import aiohttp
+import async_timeout
 
 from homeassistant.components.vacuum import (
     ATTR_STATUS,
@@ -105,7 +107,42 @@ class VHomBotConnectedVacuum(StateVacuumEntity):
 
     def update(self) -> None:
         """Update the states of Neato Vacuums."""
-        _LOGGER.debug("Running Neato Vacuums update for '%s'", self.entity_id)
+        _LOGGER.debug("Running Vhombot Vacuums update for '%s'", self.entity_id)
+        response = ''
+        try:
+            websession = async_get_clientsession(self.hass)
+
+            with async_timeout.timeout(10, loop=self.hass.loop):
+                url = 'http://{}:{}/status.txt'.format(self._host, self._port)
+                webresponse = yield from websession.get(url)
+                bytesresponse = yield from webresponse.read()
+                response = bytesresponse.decode('ascii')
+                if len(response) == 0:
+                    return False
+        except asyncio.TimeoutError:
+            _LOGGER.error("LG Hombot timed out")
+            return False
+        except aiohttp.ClientError as error:
+            _LOGGER.error("Error getting LG Hombot data: %s", error)
+            return False
+
+        _LOGGER.debug(response)
+        all_attrs = {}
+        for line in response.splitlines():
+            name, var = line.partition("=")[::2]
+            all_attrs[name] = var.strip('"')
+
+        self._status = all_attrs[ATTR_STATE]
+        _LOGGER.debug("Got new state from the vacuum: %s", self._status)
+
+        self._battery_level = int(all_attrs[ATTR_BATTERY])
+        self._is_on = self._status in ['WORKING', 'BACKMOVING_INIT']
+        self._fan_speed = FAN_SPEED_TURBO if all_attrs[ATTR_TURBO] == 'true' else FAN_SPEED_NORMAL
+        self._state_attrs[ATTR_MODE] = all_attrs[ATTR_MODE]
+        self._state_attrs[ATTR_REPEAT] = all_attrs[ATTR_REPEAT]
+        self._state_attrs[ATTR_LAST_CLEAN] = all_attrs[ATTR_LAST_CLEAN]
+
+
 
     @property
     def name(self) -> str:
