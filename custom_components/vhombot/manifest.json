@@ -1,0 +1,12 @@
+{
+    "domain": "vhombot",
+    "name": "VHombot Robot Vacuum Cleaner",
+    "documentation": "https://github.com/djjanssen/vhombot",
+    "issue_tracker": "https://github.com/djjanssen/vhombot/issues",
+    "requirements": [],
+    "dependencies": [],
+    "codeowners": ["@djjanssen"],
+    "config_flow": false,
+    "iot_class": "local_polling",
+    "version": "v2022.05.16"
+  }
