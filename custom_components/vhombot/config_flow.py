@@ -1,5 +1,4 @@
 """Config flow for lg-vhombot3."""
-import my_pypi_dependency
 import socket
 import logging
 import requests
