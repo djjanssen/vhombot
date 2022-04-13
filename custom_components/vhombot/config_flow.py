@@ -33,7 +33,7 @@ def find_devices():
     for i in range(0, 255):
         try:
             r = requests.get("http://"+ network_range + str(i) + ":6260/status.txt", timeout=0.5)
-            devices.append(r.content) 
+            devices.append(network_range + str(i)) 
             _LOGGER.info(r.content)
             _LOGGER.info("Device found at: ", "192.168.1." + str(i))
         except:
@@ -43,7 +43,8 @@ def find_devices():
 
 async def _async_has_devices(hass: HomeAssistant) -> bool:
     """Return if there are devices that can be discovered."""
-    # TODO Check if there are any devices that can be discovered in the network.
+    
+    _LOGGER.info("Looking for vhombots!")
     devices = await hass.async_add_executor_job(find_devices())
     return len(devices) > 0
 
